@@ -354,7 +354,24 @@ You MUST return strictly pure JSON (no markdown or code fences) with this exact 
 
         result = extract_json(result_text)
         if not result:
-            raise ValueError(f"Failed to parse JSON from model response. First 200 chars: {result_text[:200]}")
+            # Debug: log raw bytes of result_text
+            log(f"[PARSE_DEBUG] result_text length: {len(result_text)}")
+            log(f"[PARSE_DEBUG] result_text first 300 repr: {repr(result_text[:300])}")
+            # Last resort: try json.loads directly with strict=False
+            try:
+                import re as _re
+                # Try to find any JSON object in the text
+                _start = result_text.find('{')
+                if _start >= 0:
+                    _candidate = result_text[_start:]
+                    _result = json.loads(_candidate)
+                    if 'volumes' in _result:
+                        result = _result
+                        log("[PARSE_DEBUG] Fallback parse succeeded!")
+            except Exception as _e:
+                log(f"[PARSE_DEBUG] Fallback also failed: {_e}")
+            if not result:
+                raise ValueError(f"Failed to parse JSON from model response. First 200 chars: {result_text[:200]}")
 
         if 'volumes' not in result or not isinstance(result['volumes'], list) or len(result['volumes']) == 0:
             raise ValueError(f"Model response missing volumes array. First 300 chars: {result_text[:300]}")
