@@ -371,6 +371,9 @@ You MUST return strictly pure JSON (no markdown or code fences) with this exact 
             except Exception as _e:
                 log(f"[PARSE_DEBUG] Fallback also failed: {_e}")
             if not result:
+                import sys as _sys
+                _sys.stderr.write("[STDERR] extract_json returned None. len=" + str(len(result_text)) + " repr=" + repr(result_text[:500]) + chr(10))
+                _sys.stderr.flush()
                 raise ValueError(f"Failed to parse JSON from model response. First 200 chars: {result_text[:200]}")
 
         if 'volumes' not in result or not isinstance(result['volumes'], list) or len(result['volumes']) == 0:
