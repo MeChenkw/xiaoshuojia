@@ -1,16 +1,23 @@
 import os
+import re
 import threading
 import time
 import json
 import io
 import sys
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
 
-app = Flask(__name__)
+# Determine if running inside Docker (static dir exists) or dev mode
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(os.path.dirname(BASE_DIR), 'static')
+if os.path.isdir(STATIC_DIR):
+    app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='')
+else:
+    app = Flask(__name__)
 CORS(app)
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), 'generation.log')
@@ -25,8 +32,11 @@ def log(msg):
     except:
         pass
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///novelist.db'
+# Database configuration - use Flask instance folder for persistence
+instance_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
+if not os.path.exists(instance_path):
+    os.makedirs(instance_path)
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(instance_path, "novelist.db")}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.db = SQLAlchemy(app)
 
@@ -62,8 +72,41 @@ class Chapter(app.db.Model):
     content = app.db.Column(app.db.Text)
 
 
+def extract_json(text):
+    """Extract JSON object from text, handling markdown code fences and nested structures."""
+    if not text:
+        return None
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL | re.IGNORECASE)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except (json.JSONDecodeError, ValueError):
+            pass
+    brace_count = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if brace_count == 0:
+                start = i
+            brace_count += 1
+        elif ch == '}':
+            brace_count -= 1
+            if brace_count == 0 and start >= 0:
+                candidate = text[start:i+1]
+                try:
+                    return json.loads(candidate)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+    return None
+
+
 # Helper: call LLM API directly via requests (OpenAI-compatible)
-def call_llm_api(api_key, base_url, model, messages, json_mode=False):
+def call_llm_api(api_key, base_url, model, messages):
     """Call OpenAI-compatible LLM API using requests library."""
     if not base_url:
         base_url = 'https://api.openai.com/v1'
@@ -79,11 +122,9 @@ def call_llm_api(api_key, base_url, model, messages, json_mode=False):
         'messages': messages,
         'temperature': 0.8
     }
-    if json_mode:
-        payload['response_format'] = {'type': 'json_object'}
 
     log(f"[LLM] Calling API: {endpoint}")
-    log(f"[LLM] Model: {model}, JSON mode: {json_mode}")
+    log(f"[LLM] Model: {model}")
     log(f"[LLM] API Key prefix: {api_key[:10] if api_key else 'EMPTY'}...")
 
     try:
@@ -91,7 +132,8 @@ def call_llm_api(api_key, base_url, model, messages, json_mode=False):
             endpoint,
             headers=headers,
             json=payload,
-            timeout=(30, 300)  # 30秒连接超时, 300秒读取超时
+            timeout=(30, 300),
+            proxies={'http': None, 'https': None}
         )
         log(f"[LLM] Response status: {response.status_code}")
         response.raise_for_status()
@@ -247,38 +289,75 @@ def generate_outline(id):
         return jsonify({'error': 'API Key or Model not configured. Please set up your model settings first.'}), 400
 
     try:
+        import math
+        target_words = max(int(novel.word_count or 0), 10000)
+        words_per_chapter = 2200
+        total_chapters = max(5, round(target_words / words_per_chapter))
+        if total_chapters <= 30:
+            num_volumes = max(2, round(total_chapters / 5))
+            chapters_per_volume_actual = max(3, round(total_chapters / num_volumes))
+        elif total_chapters <= 80:
+            num_volumes = max(3, round(total_chapters / 8))
+            chapters_per_volume_actual = max(5, round(total_chapters / num_volumes))
+        elif total_chapters <= 200:
+            num_volumes = max(5, round(total_chapters / 12))
+            chapters_per_volume_actual = max(8, round(total_chapters / num_volumes))
+        else:
+            num_volumes = max(8, round(total_chapters / 20))
+            chapters_per_volume_actual = max(10, round(total_chapters / num_volumes))
+
         if locale == 'zh':
             prompt = f"""你是一个专业的小说大纲设计师。请为以下创意生成详细的小说大纲。
 
 用户创意：{novel.user_idea}
-目标字数：{novel.word_count}字
+目标总字数：{target_words}字
+预计卷数：{num_volumes}卷
+每卷约{chapters_per_volume_actual}章，每章约{words_per_chapter}字
 分类：{novel.category}
 
-请生成包含3-5卷的完整大纲，每卷包含3-5章。
+要求：
+1. 严格按照{num_volumes}卷生成大纲
+2. 每卷严格包含{chapters_per_volume_actual}章
+3. 章节标题必须包含章节编号，格式为"第X章：标题"（例如"第一章：觉醒"），不能只有标题
+4. 章节标题要简洁有力，章纲要概括本章核心情节
+5. 整体结构要有起承转合，卷与卷之间有明确的阶段性目标
+
 请用中文回复。
 必须严格返回纯JSON格式（不要包含任何markdown标记或代码块），格式如下：
-{{"title": "小说标题", "volumes": [{{"title": "卷名", "description": "卷简介", "chapters": [{{"title": "章名", "outline": "章纲简介"}}]}}]}}"""
+{{"title": "小说标题", "volumes": [{{"title": "卷名", "description": "卷简介", "chapters": [{{"title": "第X章：标题", "outline": "章纲简介"}}]}}]}}"""
         else:
             prompt = f"""You are a professional novel outline designer. Generate a detailed outline for the following idea.
 
 User Idea: {novel.user_idea}
-Target Word Count: {novel.word_count}
+Target Total Word Count: {target_words}
+Expected Volumes: {num_volumes}
+Approximately {chapters_per_volume_actual} chapters per volume, about {words_per_chapter} words per chapter
 Category: {novel.category}
 
-Generate a complete outline with 3-5 volumes, each containing 3-5 chapters.
+Requirements:
+1. Generate exactly {num_volumes} volumes
+2. Each volume must have exactly {chapters_per_volume_actual} chapters
+3. Chapter titles MUST include chapter number prefix in format "Chapter X: Title" (e.g. "Chapter 1: Awakening"), not just the title
+4. Chapter titles should be compelling, outlines should summarize the core plot
+5. Overall structure should have clear narrative arcs with distinct phase goals per volume
+
 Reply in English.
 You MUST return strictly pure JSON (no markdown or code fences) with this exact format:
-{{"title": "Novel Title", "volumes": [{{"title": "Volume Title", "description": "Volume description", "chapters": [{{"title": "Chapter Title", "outline": "Chapter outline"}}]}}]}}"""
+{{"title": "Novel Title", "volumes": [{{"title": "Volume Title", "description": "Volume description", "chapters": [{{"title": "Chapter X: Title", "outline": "Chapter outline"}}]}}]}}"""
 
         result_text = call_llm_api(
             api_key=api_key,
             base_url=base_url,
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            json_mode=True
+            messages=[{"role": "user", "content": prompt}]
         )
 
-        result = json.loads(result_text)
+        result = extract_json(result_text)
+        if not result:
+            raise ValueError(f"Failed to parse JSON from model response. First 200 chars: {result_text[:200]}")
+
+        if 'volumes' not in result or not isinstance(result['volumes'], list) or len(result['volumes']) == 0:
+            raise ValueError(f"Model response missing volumes array. First 300 chars: {result_text[:300]}")
 
         novel.title = result.get('title', novel.title)
 
@@ -335,104 +414,122 @@ def generate_novel(id):
         return jsonify({'error': 'API Key or Model not configured'}), 400
 
     generation_stop_flags[id] = False
+    generation_progress = {'current': 0, 'total': 0, 'errors': []}
+    volume_threads = []
 
-    def generate_content():
-        import time
+    def generate_volume(volume_id, volume_order, novel_id):
+        """Generate all chapters in a volume sequentially."""
         with app.app_context():
             try:
-                current_novel = Novel.query.get(id)
-                if not current_novel:
-                    log(f"[Generate] Novel {id} not found in thread")
+                novel = Novel.query.get(novel_id)
+                if not novel:
+                    return
+                volume = Volume.query.get(volume_id)
+                if not volume:
                     return
 
-                total = sum(len(v.chapters) for v in current_novel.volumes)
-                current = 0
-                log(f"[Generate] Starting generation for novel {id} ({total} chapters), model={model}")
+                for chapter in sorted(volume.chapters, key=lambda x: x.order_index):
+                    if generation_stop_flags.get(novel_id, False):
+                        log(f"[Generate] Volume {volume_order} stopped by user")
+                        return
 
-                for volume in sorted(current_novel.volumes, key=lambda x: x.order_index):
-                    for chapter in sorted(volume.chapters, key=lambda x: x.order_index):
-                        if generation_stop_flags.get(id, False):
-                            log(f"[Generate] Generation stopped by user for novel {id}")
-                            current_novel.status = 'interrupted'
-                            current_novel.updated_at = datetime.utcnow()
-                            app.db.session.commit()
-                            return
+                    if chapter.content:
+                        generation_progress['current'] += 1
+                        log(f"[Generate] Vol {volume_order} skipping {chapter.title} (has content)")
+                        continue
 
-                        if chapter.content:
-                            current += 1
-                            log(f"[Generate] Skipping chapter {current}/{total}: {chapter.title} (already has content)")
-                            continue
+                    log(f"[Generate] Vol {volume_order} generating {chapter.title}")
 
-                        log(f"[Generate] Generating chapter {current+1}/{total}: {chapter.title}")
+                    if locale == 'zh':
+                        prompt = f"""你是一个专业的小说作家。请根据以下大纲撰写章节内容。
 
-                        if locale == 'zh':
-                            prompt = f"""你是一个专业的小说作家。请根据以下大纲撰写章节内容。
-
-小说标题：{current_novel.title}
+小说标题：{novel.title}
 卷名：{volume.title}
 章名：{chapter.title}
 章纲：{chapter.outline}
 
-请撰写2000-3000字的章节内容，情节生动，人物鲜明。
+请撰写2000-2500字的章节内容，情节生动，人物鲜明。字数必须控制在2000-2500字之间，不要超出范围。
 请用中文写作。"""
-                        else:
-                            prompt = f"""You are a professional novelist. Write a chapter based on the following outline.
+                    else:
+                        prompt = f"""You are a professional novelist. Write a chapter based on the following outline.
 
-Novel Title: {current_novel.title}
+Novel Title: {novel.title}
 Volume Title: {volume.title}
 Chapter Title: {chapter.title}
 Chapter Outline: {chapter.outline}
 
-Write 2000-3000 words of chapter content with vivid plot and distinct characters.
+Write exactly 2000-2500 words of chapter content with vivid plot and distinct characters. Keep the word count strictly between 2000-2500 words.
 Write in English."""
 
-                        chapter_start_time = time.time()
-                        try:
-                            log(f"[Generate] Calling LLM for chapter {chapter.title}...")
-                            content = call_llm_api(
-                                api_key=api_key,
-                                base_url=base_url,
-                                model=model,
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            chapter.content = content
-                            current_novel.updated_at = datetime.utcnow()
-                            app.db.session.commit()
-                            current += 1
-                            elapsed = time.time() - chapter_start_time
-                            log(f"[Generate] Chapter {current}/{total} done: {chapter.title} ({len(content)} chars) in {elapsed:.1f}s")
-                        except Exception as e:
-                            elapsed = time.time() - chapter_start_time
-                            log(f"[Generate] ERROR generating chapter {chapter.id} after {elapsed:.1f}s: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            current_novel.status = 'interrupted'
-                            current_novel.updated_at = datetime.utcnow()
-                            app.db.session.commit()
-                            return
+                    start_time = time.time()
+                    try:
+                        content = call_llm_api(
+                            api_key=api_key,
+                            base_url=base_url,
+                            model=model,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        # Re-query chapter in this thread's session
+                        ch = Chapter.query.get(chapter.id)
+                        ch.content = content
+                        novel.updated_at = datetime.utcnow()
+                        app.db.session.commit()
+                        generation_progress['current'] += 1
+                        elapsed = time.time() - start_time
+                        log(f"[Generate] Vol {volume_order} done: {chapter.title} ({len(content)} chars) in {elapsed:.1f}s")
+                    except Exception as e:
+                        elapsed = time.time() - start_time
+                        log(f"[Generate] Vol {volume_order} ERROR: {chapter.title} after {elapsed:.1f}s: {e}")
+                        generation_progress['errors'].append(str(e))
+                        return
 
-                current_novel.status = 'done'
-                current_novel.updated_at = datetime.utcnow()
-                app.db.session.commit()
-                log(f"[Generate] Novel {id} generation complete!")
+                log(f"[Generate] Volume {volume_order} complete")
 
             except Exception as e:
-                log(f"[Generate] FATAL error in generation thread: {e}")
-                import traceback
-                traceback.print_exc()
-                try:
-                    current_novel = Novel.query.get(id)
-                    if current_novel:
-                        current_novel.status = 'interrupted'
-                        current_novel.updated_at = datetime.utcnow()
-                        app.db.session.commit()
-                except:
-                    pass
+                log(f"[Generate] Volume {volume_order} FATAL error: {e}")
+                generation_progress['errors'].append(str(e))
 
-    thread = threading.Thread(target=generate_content)
-    thread.daemon = True
-    thread.start()
-    log(f"[Generate] Thread started for novel {id}")
+    def monitor_generation(novel_id, threads):
+        """Monitor all volume threads and update novel status when done."""
+        with app.app_context():
+            # Wait for all volume threads
+            for t in threads:
+                t.join()
+
+            novel = Novel.query.get(novel_id)
+            if not novel:
+                return
+
+            if generation_stop_flags.get(novel_id, False):
+                novel.status = 'interrupted'
+            elif generation_progress['errors']:
+                novel.status = 'interrupted'
+                log(f"[Generate] Novel {novel_id} finished with errors: {generation_progress['errors']}")
+            else:
+                novel.status = 'done'
+            novel.updated_at = datetime.utcnow()
+            app.db.session.commit()
+            log(f"[Generate] Novel {novel_id} generation complete, status={novel.status}")
+
+    # Start volume threads
+    current_novel = Novel.query.get(id)
+    volumes = sorted(current_novel.volumes, key=lambda x: x.order_index)
+    total_chapters = sum(len(v.chapters) for v in volumes)
+    generation_progress['total'] = total_chapters
+
+    log(f"[Generate] Starting parallel generation for novel {id} ({len(volumes)} volumes, {total_chapters} chapters)")
+
+    for volume in volumes:
+        t = threading.Thread(target=generate_volume, args=(volume.id, volume.order_index, id))
+        t.daemon = True
+        volume_threads.append(t)
+        t.start()
+        log(f"[Generate] Started thread for volume {volume.order_index}: {volume.title}")
+
+    # Start monitor thread
+    monitor_thread = threading.Thread(target=monitor_generation, args=(id, volume_threads))
+    monitor_thread.daemon = True
+    monitor_thread.start()
 
     return jsonify({'status': 'generating'})
 
@@ -497,6 +594,66 @@ def update_chapter(id, chapter_id):
     chapter.content = data.get('content', chapter.content)
     app.db.session.commit()
     return jsonify(serialize_chapter(chapter))
+
+@app.route('/api/novels/<int:id>/chapters/<int:chapter_id>/rewrite', methods=['POST'])
+def rewrite_chapter(id, chapter_id):
+    """Rewrite a specific chapter using AI."""
+    novel = Novel.query.get_or_404(id)
+    chapter = Chapter.query.get_or_404(chapter_id)
+
+    # Find the volume this chapter belongs to
+    volume = None
+    for v in novel.volumes:
+        if any(c.id == chapter_id for c in v.chapters):
+            volume = v
+            break
+
+    if not volume:
+        return jsonify({'error': 'Chapter not found in novel volumes'}), 400
+
+    api_key, base_url, model = get_api_config_from_request()
+    locale = request.headers.get('X-Locale', 'zh')
+
+    if not api_key or not model:
+        return jsonify({'error': 'API Key or Model not configured'}), 400
+
+    try:
+        if locale == 'zh':
+            prompt = f"""你是一个专业的小说作家。请根据以下大纲重新撰写章节内容。
+
+小说标题：{novel.title}
+卷名：{volume.title}
+章名：{chapter.title}
+章纲：{chapter.outline}
+
+请撰写2000-2500字的章节内容，情节生动，人物鲜明。字数必须控制在2000-2500字之间，不要超出范围。
+请用中文写作。"""
+        else:
+            prompt = f"""You are a professional novelist. Rewrite the chapter based on the following outline.
+
+Novel Title: {novel.title}
+Volume Title: {volume.title}
+Chapter Title: {chapter.title}
+Chapter Outline: {chapter.outline}
+
+Write exactly 2000-2500 words of chapter content with vivid plot and distinct characters. Keep the word count strictly between 2000-2500 words.
+Write in English."""
+
+        content = call_llm_api(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        chapter.content = content
+        novel.updated_at = datetime.utcnow()
+        app.db.session.commit()
+
+        return jsonify(serialize_chapter(chapter))
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/novels/<int:id>/download', methods=['GET'])
 def download_txt(id):
@@ -676,8 +833,7 @@ def test_api():
             api_key=api_key,
             base_url=base_url,
             model=model,
-            messages=[{"role": "user", "content": "Hi! Respond with one word."}],
-            json_mode=False
+            messages=[{"role": "user", "content": "Hi! Respond with one word."}]
         )
         log(f"[TestAPI] Success! Got response: {content[:50]}...")
         return jsonify({'success': True, 'message': f'Connection successful! Got: {content[:50]}...'})
@@ -823,27 +979,25 @@ def suggest_options():
     if not pool:
         return jsonify([])
 
-    # Default to AI if category is provided, since pool is generic
-    should_use_ai = use_ai or (category and category != '玄幻')
+    api_key, base_url, model = get_api_config_from_request()
+    should_use_ai = use_ai or bool(api_key and model)
 
-    if should_use_ai:
-        api_key, base_url, model = get_api_config_from_request()
-        if api_key and model:
-            try:
-                dim_names = {
-                    'zh': {
-                        'protagonist': '主角设定', 'world': '世界观', 'conflict': '核心冲突',
-                        'style': '风格基调', 'advantage': '主角优势'
-                    },
-                    'en': {
-                        'protagonist': 'protagonist', 'world': 'world setting', 'conflict': 'core conflict',
-                        'style': 'writing style', 'advantage': 'protagonist advantage'
-                    }
+    if should_use_ai and api_key and model:
+        try:
+            dim_names = {
+                'zh': {
+                    'protagonist': '主角设定', 'world': '世界观', 'conflict': '核心冲突',
+                    'style': '风格基调', 'advantage': '主角优势'
+                },
+                'en': {
+                    'protagonist': 'protagonist', 'world': 'world setting', 'conflict': 'core conflict',
+                    'style': 'writing style', 'advantage': 'protagonist advantage'
                 }
-                dim_name = dim_names.get(locale, dim_names['zh']).get(dimension, dimension)
+            }
+            dim_name = dim_names.get(locale, dim_names['zh']).get(dimension, dimension)
 
-                if locale == 'zh':
-                    prompt = f"""你是小说创意助手。请根据以下信息，生成10个新颖的{dim_name}创意选项。
+            if locale == 'zh':
+                prompt = f"""你是小说创意助手。请根据以下信息，生成10个新颖的{dim_name}创意选项。
 
 小说分类：{category}
 故事背景：{context}
@@ -854,8 +1008,8 @@ def suggest_options():
 3. 选项要有创意，避免陈词滥调
 4. 直接返回列表，每行一个选项，不要编号和额外说明
 5. 确保选项与故事背景相关"""
-                else:
-                    prompt = f"""You are a novel idea assistant. Based on the following information, generate 10 fresh creative options for {dim_name}.
+            else:
+                prompt = f"""You are a novel idea assistant. Based on the following information, generate 10 fresh creative options for {dim_name}.
 
 Novel category: {category}
 Story context: {context}
@@ -867,20 +1021,19 @@ Requirements:
 4. Return a plain list, one per line, no numbering or extra text
 5. Make sure options are relevant to the story context"""
 
-                content = call_llm_api(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    json_mode=False
-                )
-                ai_options = [line.strip() for line in content.split('\n') if line.strip() and not line.strip().startswith('- ')][:10]
-                if len(ai_options) >= 5:
-                    log(f"[Suggest] AI generated {len(ai_options)} options for {dimension}")
-                    return jsonify(ai_options)
-            except Exception as e:
-                log(f"[Suggest] AI generation failed: {e}")
-                # Fall back to pool rotation
+            content = call_llm_api(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            ai_options = [line.strip() for line in content.split('\n') if line.strip() and not line.strip().startswith('- ')][:10]
+            if len(ai_options) >= 5:
+                log(f"[Suggest] AI generated {len(ai_options)} options for {dimension}")
+                return jsonify(ai_options)
+        except Exception as e:
+            log(f"[Suggest] AI generation failed: {e}")
+            # Fall back to pool rotation
 
     # Pool rotation: return a different slice based on refresh count
     key = f"{locale}:{dimension}"
@@ -1138,6 +1291,17 @@ def demo_generate_outline_en(id):
     return jsonify(serialize_novel(novel, include_details=True))
 
 
+
+# SPA catch-all: serve frontend static files
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    static_dir = STATIC_DIR if os.path.isdir(STATIC_DIR) else None
+    if static_dir:
+        if path and os.path.isfile(os.path.join(static_dir, path)):
+            return send_from_directory(static_dir, path)
+        return send_from_directory(static_dir, 'index.html')
+    return jsonify({'error': 'Frontend not built. Run npm run build in frontend/ first.'}), 503
 if __name__ == '__main__':
     startup_check()
     app.run(host='0.0.0.0', port=5000, debug=True)

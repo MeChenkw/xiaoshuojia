@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../store';
 import { t } from '../i18n';
 import { suggestOptions } from '../api';
@@ -93,40 +93,61 @@ function IdeaEnhancer({ idea, category, onComplete, onSkip, onApply }: IdeaEnhan
   const [customInputs, setCustomInputs] = useState<Record<Dimension, string>>({
     protagonist: '', world: '', conflict: '', style: '', advantage: '',
   });
-  const [options, setOptions] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
+  // Cache options for all dimensions
+  const [cachedOptions, setCachedOptions] = useState<Record<Dimension, string[]>>({
+    protagonist: [], world: [], conflict: [], style: [], advantage: [],
+  });
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshingDimension, setRefreshingDimension] = useState<Dimension | null>(null);
   const [showPreview, setShowPreview] = useState(neededDimensions.length === 0);
+  const loadedRef = useRef(false);
 
   const dimension = neededDimensions[currentIndex];
   const progress = neededDimensions.length > 0
     ? ((currentIndex + 1) / neededDimensions.length) * 100
     : 100;
 
-  const useAiByDefault = category && category !== '玄幻';
+  const options = cachedOptions[dimension] || [];
 
-  const loadOptions = useCallback(async (useAi = false) => {
-    if (!dimension) return;
-    if (useAi || useAiByDefault) {
-      setAiLoading(true);
-    } else {
-      setLoading(true);
-    }
-    try {
-      const opts = await suggestOptions(dimension, idea, useAi || useAiByDefault, category);
-      setOptions(opts);
-    } catch {
-      setOptions([]);
-    }
-    setLoading(false);
-    setAiLoading(false);
-  }, [dimension, idea, category, useAiByDefault]);
-
+  // Preload all dimensions' options on mount
   useEffect(() => {
-    if (dimension) {
-      loadOptions(useAiByDefault);
+    if (neededDimensions.length === 0) {
+      setInitialLoading(false);
+      return;
     }
-  }, [loadOptions]);
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+    const loadAllOptions = async () => {
+      const results: Record<Dimension, string[]> = {
+        protagonist: [], world: [], conflict: [], style: [], advantage: [],
+      };
+      // Load all needed dimensions in parallel
+      await Promise.all(neededDimensions.map(async (dim) => {
+        try {
+          const opts = await suggestOptions(dim, idea, true, category);
+          results[dim] = opts;
+        } catch {
+          results[dim] = [];
+        }
+      }));
+      setCachedOptions(results);
+      setInitialLoading(false);
+    };
+    loadAllOptions();
+  }, [idea, category]);
+
+  // Refresh only current dimension
+  const handleRefreshCurrent = async () => {
+    if (!dimension) return;
+    setRefreshingDimension(dimension);
+    try {
+      const opts = await suggestOptions(dimension, idea, true, category);
+      setCachedOptions(prev => ({ ...prev, [dimension]: opts }));
+    } catch {
+      // Keep existing options on error
+    }
+    setRefreshingDimension(null);
+  };
 
   const handleSelect = (value: string) => {
     if (!dimension) return;
@@ -169,7 +190,7 @@ function IdeaEnhancer({ idea, category, onComplete, onSkip, onApply }: IdeaEnhan
   };
 
   const handleRefresh = () => {
-    loadOptions(true);
+    handleRefreshCurrent();
   };
 
   const enhancedIdea = buildEnhancedIdea(idea, values, locale);
@@ -269,11 +290,11 @@ function IdeaEnhancer({ idea, category, onComplete, onSkip, onApply }: IdeaEnhan
         <div className="flex justify-end mb-2">
           <button
             onClick={handleRefresh}
-            disabled={aiLoading}
+            disabled={refreshingDimension === dimension}
             className="text-xs flex items-center gap-1 text-accent hover:text-primary transition-colors disabled:opacity-50"
             title={t('ideaEnhancer.refreshTooltip', locale)}
           >
-            {aiLoading ? (
+            {refreshingDimension === dimension ? (
               <>
                 <Loader2 size={12} className="animate-spin" />
                 {t('ideaEnhancer.aiGenerating', locale)}
@@ -289,29 +310,29 @@ function IdeaEnhancer({ idea, category, onComplete, onSkip, onApply }: IdeaEnhan
 
         {/* Options Grid */}
         <div className="grid grid-cols-2 gap-2 mb-4">
-          {options.map((option, i) => (
-            <button
-              key={`${dimension}-${i}`}
-              onClick={() => handleSelect(option)}
-              className={`p-3 text-sm rounded-lg border text-left transition-all ${
-                values[dimension] === option
-                  ? 'border-primary bg-primary/5'
-                  : 'border-border hover:border-gray'
-              }`}
-            >
-              {option}
-            </button>
-          ))}
+          {initialLoading ? (
+            <div className="col-span-2 text-center py-8 text-gray">
+              <Loader2 size={20} className="animate-spin inline-block mr-2" />
+              {locale === 'zh' ? '正在生成创意选项...' : 'Generating creative options...'}
+            </div>
+          ) : (
+            options.map((option, i) => (
+              <button
+                key={`${dimension}-${i}`}
+                onClick={() => handleSelect(option)}
+                className={`p-3 text-sm rounded-lg border text-left transition-all ${
+                  values[dimension] === option
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-gray'
+                }`}
+              >
+                {option}
+              </button>
+            ))
+          )}
         </div>
 
-        {/* Loading State */}
-        {loading && (
-          <div className="text-center py-4 text-gray">
-            {t('loading', locale)}...
-          </div>
-        )}
-
-        {/* Custom Input - Per Dimension */}
+        {/* Custom Input */}
         <div className="mb-6">
           <input
             type="text"

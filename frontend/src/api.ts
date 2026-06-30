@@ -2,6 +2,32 @@ import { Novel, Volume, Chapter, ApiConfig, Provider, Progress, IdeaDimensions }
 
 const API_BASE = '/api';
 
+const DEFAULT_TIMEOUT = 300000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit & { timeout?: number }
+): Promise<Response> {
+  const timeout = init?.timeout ?? DEFAULT_TIMEOUT;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const res = await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+    return res;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('请求超时，请稍后重试');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function getHeaders(): HeadersInit {
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
@@ -23,19 +49,19 @@ function getHeaders(): HeadersInit {
 
 // Novels API
 export async function getNovels(): Promise<Novel[]> {
-  const res = await fetch(`${API_BASE}/novels`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to fetch novels');
   return res.json();
 }
 
 export async function getNovel(id: number): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/novels/${id}`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to fetch novel');
   return res.json();
 }
 
 export async function createNovel(data: { title: string; category: string; user_idea: string; word_count: number }): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/novels`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify(data),
@@ -45,7 +71,7 @@ export async function createNovel(data: { title: string; category: string; user_
 }
 
 export async function deleteNovel(id: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/novels/${id}`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}`, {
     method: 'DELETE',
     headers: getHeaders(),
   });
@@ -53,7 +79,7 @@ export async function deleteNovel(id: number): Promise<void> {
 }
 
 export async function confirmNovel(id: number): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/novels/${id}/confirm`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/confirm`, {
     method: 'PUT',
     headers: getHeaders(),
   });
@@ -62,7 +88,7 @@ export async function confirmNovel(id: number): Promise<Novel> {
 }
 
 export async function updateOutline(id: number, volumes: Partial<Volume>[]): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/novels/${id}/outline`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/outline`, {
     method: 'PUT',
     headers: getHeaders(),
     body: JSON.stringify({ volumes }),
@@ -72,7 +98,7 @@ export async function updateOutline(id: number, volumes: Partial<Volume>[]): Pro
 }
 
 export async function generateOutline(id: number): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/novels/${id}/generate-outline`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/generate-outline`, {
     method: 'POST',
     headers: getHeaders(),
   });
@@ -81,7 +107,7 @@ export async function generateOutline(id: number): Promise<Novel> {
 }
 
 export async function generateNovel(id: number): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/novels/${id}/generate`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/generate`, {
     method: 'POST',
     headers: getHeaders(),
   });
@@ -90,7 +116,7 @@ export async function generateNovel(id: number): Promise<{ status: string }> {
 }
 
 export async function stopGeneration(id: number): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/novels/${id}/stop`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/stop`, {
     method: 'POST',
     headers: getHeaders(),
   });
@@ -99,13 +125,13 @@ export async function stopGeneration(id: number): Promise<{ status: string }> {
 }
 
 export async function getProgress(id: number): Promise<Progress> {
-  const res = await fetch(`${API_BASE}/novels/${id}/progress`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/progress`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to get progress');
   return res.json();
 }
 
 export async function updateChapter(id: number, chapterId: number, content: string): Promise<Chapter> {
-  const res = await fetch(`${API_BASE}/novels/${id}/chapters/${chapterId}`, {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/chapters/${chapterId}`, {
     method: 'PUT',
     headers: getHeaders(),
     body: JSON.stringify({ content }),
@@ -114,8 +140,17 @@ export async function updateChapter(id: number, chapterId: number, content: stri
   return res.json();
 }
 
+export async function rewriteChapter(id: number, chapterId: number): Promise<Chapter> {
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/chapters/${chapterId}/rewrite`, {
+    method: 'POST',
+    headers: getHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to rewrite chapter');
+  return res.json();
+}
+
 export async function downloadTxt(id: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/novels/${id}/download`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/download`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to download');
   const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
@@ -128,7 +163,7 @@ export async function downloadTxt(id: number): Promise<void> {
 }
 
 export async function exportEpub(id: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/novels/${id}/export/epub`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${id}/export/epub`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to export');
   const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
@@ -141,7 +176,7 @@ export async function exportEpub(id: number): Promise<void> {
 }
 
 export async function downloadChapterTxt(novelId: number, chapterId: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/novels/${novelId}/chapters/${chapterId}/download/txt`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${novelId}/chapters/${chapterId}/download/txt`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to download chapter');
   const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
@@ -156,7 +191,7 @@ export async function downloadChapterTxt(novelId: number, chapterId: number): Pr
 }
 
 export async function exportChapterEpub(novelId: number, chapterId: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/novels/${novelId}/chapters/${chapterId}/export/epub`, { headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/novels/${novelId}/chapters/${chapterId}/export/epub`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to export chapter');
   const blob = await res.blob();
   const url = window.URL.createObjectURL(blob);
@@ -172,13 +207,13 @@ export async function exportChapterEpub(novelId: number, chapterId: number): Pro
 
 // Providers API
 export async function getProviders(): Promise<Provider[]> {
-  const res = await fetch(`${API_BASE}/providers`);
+  const res = await fetchWithTimeout(`${API_BASE}/providers`);
   if (!res.ok) throw new Error('Failed to fetch providers');
   return res.json();
 }
 
 export async function testApi(apiKey: string, baseUrl: string, model: string): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/test-api`, {
+  const res = await fetchWithTimeout(`${API_BASE}/test-api`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ api_key: apiKey, base_url: baseUrl, model }),
@@ -189,7 +224,7 @@ export async function testApi(apiKey: string, baseUrl: string, model: string): P
 
 // Suggest options
 export async function suggestOptions(dimension: string, context: string, useAi = false, category = ''): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/suggest-options`, {
+  const res = await fetchWithTimeout(`${API_BASE}/suggest-options`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ dimension, context, use_ai: useAi, category }),
@@ -200,19 +235,19 @@ export async function suggestOptions(dimension: string, context: string, useAi =
 
 // Demo API
 export async function demoSeed(): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/demo/seed`, { method: 'POST', headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/demo/seed`, { method: 'POST', headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to seed demo');
   return res.json();
 }
 
 export async function demoSeedEn(): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/demo/seed-en`, { method: 'POST', headers: getHeaders() });
+  const res = await fetchWithTimeout(`${API_BASE}/demo/seed-en`, { method: 'POST', headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to seed demo');
   return res.json();
 }
 
 export async function demoGenerateOutline(id: number): Promise<Novel> {
-  const res = await fetch(`${API_BASE}/demo/generate-outline/${id}`, {
+  const res = await fetchWithTimeout(`${API_BASE}/demo/generate-outline/${id}`, {
     method: 'POST',
     headers: getHeaders(),
   });

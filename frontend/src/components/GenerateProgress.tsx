@@ -150,17 +150,6 @@ function GenerateProgress({ novelId, onStuck, onProgressUpdate, onStop }: Genera
         </div>
       )}
       
-      {progress?.logs && progress.logs.length > 0 && (
-        <div className="mt-3 text-xs text-gray-600 max-h-32 overflow-y-auto bg-gray-50 rounded p-2">
-          <p className="font-medium mb-1 text-gray-700">{locale === 'zh' ? '最近日志' : 'Recent logs'}:</p>
-          {progress.logs.slice(-5).map((log, i) => (
-            <p key={i} className={log.includes('ERROR') ? 'text-red-500' : ''}>
-              {log}
-            </p>
-          ))}
-        </div>
-      )}
-      
       <div className="flex items-center gap-2 mt-2 text-sm text-gray">
         <Loader2 size={14} className="animate-spin" />
         <span>{t('loading', locale)}</span>

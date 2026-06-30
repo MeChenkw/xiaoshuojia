@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { t } from '../i18n';
-import { getNovel, updateChapter, downloadTxt, exportEpub, downloadChapterTxt, exportChapterEpub, generateNovel, stopGeneration } from '../api';
+import { getNovel, updateChapter, downloadTxt, exportEpub, downloadChapterTxt, exportChapterEpub, generateNovel, stopGeneration, rewriteChapter } from '../api';
 import { Novel } from '../types';
 import GenerateProgress from './GenerateProgress';
 import { 
@@ -26,6 +26,7 @@ function NovelReader() {
   const [downloading, setDownloading] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [rewriting, setRewriting] = useState(false);
   const lastProgressRef = useRef(0);
   const mainContentRef = useRef<HTMLDivElement>(null);
   
@@ -55,15 +56,20 @@ function NovelReader() {
       const data = await getNovel(novelId);
       setNovel(data);
       
+      let completed = 0;
       outer: for (let v = 0; v < (data.volumes?.length || 0); v++) {
         for (let c = 0; c < (data.volumes?.[v]?.chapters?.length || 0); c++) {
           if (data.volumes?.[v]?.chapters?.[c]?.content) {
-            setCurrentVolumeIndex(v);
-            setCurrentChapterIndex(c);
-            break outer;
+            completed++;
+            if (completed > lastProgressRef.current) {
+              setCurrentVolumeIndex(v);
+              setCurrentChapterIndex(c);
+              break outer;
+            }
           }
         }
       }
+      lastProgressRef.current = completed;
     } catch (e) {
       console.error('Failed to load novel:', e);
     } finally {
@@ -145,7 +151,7 @@ function NovelReader() {
 
   const handleProgressUpdate = async (progress: { current: number; total: number; status: string }) => {
     try {
-      if (progress.current > lastProgressRef.current && novel?.status === 'generating') {
+      if (progress.current !== lastProgressRef.current) {
         lastProgressRef.current = progress.current;
         await loadNovel();
       }
@@ -168,6 +174,20 @@ function NovelReader() {
       console.error('Failed to save chapter:', e);
     }
     setSaving(false);
+  };
+
+  const handleRewriteChapter = async () => {
+    if (!novel || !currentChapter?.id) return;
+    setRewriting(true);
+    try {
+      await rewriteChapter(novelId, currentChapter.id);
+      await loadNovel();
+      scrollToTop();
+    } catch (e) {
+      console.error('Failed to rewrite chapter:', e);
+      alert('章节重写失败: ' + (e as Error).message);
+    }
+    setRewriting(false);
   };
 
   const scrollToTop = () => {
@@ -515,16 +535,26 @@ function NovelReader() {
                     </button>
                   </>
                 ) : (
-                  <button
-                    onClick={() => {
-                      setEditingChapterId(currentChapter?.id || null);
-                      setEditContent(currentChapter?.content || '');
-                    }}
-                    className="w-full vercel-btn-secondary justify-center flex gap-1"
-                  >
-                    <Edit3 size={14} />
-                    {t('reader.editChapter', locale)}
-                  </button>
+                  <>
+                    <button
+                      onClick={() => {
+                        setEditingChapterId(currentChapter?.id || null);
+                        setEditContent(currentChapter?.content || '');
+                      }}
+                      className="w-full vercel-btn-secondary justify-center flex gap-1"
+                    >
+                      <Edit3 size={14} />
+                      {t('reader.editChapter', locale)}
+                    </button>
+                    <button
+                      onClick={handleRewriteChapter}
+                      disabled={rewriting}
+                      className="w-full vercel-btn-secondary justify-center flex gap-1"
+                    >
+                      {rewriting ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      {locale === 'zh' ? 'AI 重写' : 'AI Rewrite'}
+                    </button>
+                  </>
                 )}
               </div>
             )}

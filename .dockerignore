@@ -1,0 +1,14 @@
+.git
+.gitignore
+node_modules
+frontend/node_modules
+frontend/dist
+backend/__pycache__
+backend/instance
+backend/generation.log
+.trae
+.vscode
+.idea
+*.pyc
+__pycache__
+.env
