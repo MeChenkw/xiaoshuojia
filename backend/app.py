@@ -14,10 +14,7 @@ import requests
 # Determine if running inside Docker (static dir exists) or dev mode
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
-if os.path.isdir(STATIC_DIR):
-    app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='')
-else:
-    app = Flask(__name__)
+app = Flask(__name__)
 CORS(app)
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), 'generation.log')
@@ -1302,9 +1299,10 @@ def health():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
-    static_dir = STATIC_DIR if os.path.isdir(STATIC_DIR) else None
-    if static_dir:
-        if path and os.path.isfile(os.path.join(static_dir, path)):
+    static_dir = os.path.join(BASE_DIR, 'static')
+    if os.path.isdir(static_dir):
+        file_path = os.path.join(static_dir, path) if path else os.path.join(static_dir, 'index.html')
+        if path and os.path.isfile(file_path):
             return send_from_directory(static_dir, path)
         return send_from_directory(static_dir, 'index.html')
     return jsonify({'error': 'Frontend not built. Run npm run build in frontend/ first.'}), 503
