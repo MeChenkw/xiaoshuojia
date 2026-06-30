@@ -74,6 +74,9 @@ def extract_json(text):
     if not text:
         return None
     text = text.strip()
+    # Remove BOM and zero-width characters
+    for ch in ['﻿', '​', '‌', '‍']:
+        text = text.replace(ch, '')
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
