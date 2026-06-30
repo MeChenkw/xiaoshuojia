@@ -13,7 +13,7 @@ import requests
 
 # Determine if running inside Docker (static dir exists) or dev mode
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(os.path.dirname(BASE_DIR), 'static')
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
 if os.path.isdir(STATIC_DIR):
     app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='')
 else:
