@@ -1292,6 +1292,12 @@ def demo_generate_outline_en(id):
 
 
 
+
+# Health check for load balancer
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'})
+
 # SPA catch-all: serve frontend static files
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
